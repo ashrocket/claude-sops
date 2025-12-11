@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""
+Extract bash command failures WITH their resolutions from Claude Code sessions.
+Groups consecutive failures, shows what worked, and provides SOPs for each error type.
+
+Usage: claude-failures [project-path] [--recent N] [--sop]
+"""
+
+import json
+import sys
+import os
+from pathlib import Path
+
+# Standard Operating Procedures for each error type
+ERROR_SOPS = {
+    "SHELL_PARSE_ERROR": {
+        "description": "zsh cannot parse command substitution or special characters",
+        "common_causes": [
+            "Using $(...) with complex expressions containing quotes or pipes",
+            "Nested command substitutions",
+            "Special characters like ( ) not properly escaped"
+        ],
+        "sop": [
+            "1. AVOID $(...) - use simple pipes instead",
+            "2. Split complex commands into multiple simple commands",
+            "3. Use the Read tool instead of cat/head for file contents",
+            "4. Store intermediate results: run `ls -t dir/*.jsonl | head -1` first, then use result",
+            "5. For complex parsing, write a Python script file instead of inline"
+        ],
+        "example_bad": "LATEST=$(ls -t dir/*.jsonl | head -1); cat \"$LATEST\"",
+        "example_good": "ls -t dir/*.jsonl | head -1  # then use Read tool on the result"
+    },
+    "SYNTAX_ERROR": {
+        "description": "Python or shell syntax error in inline code",
+        "common_causes": [
+            "f-strings with escaped quotes inside dict access",
+            "Heredoc escaping issues",
+            "Mixing single/double quotes incorrectly"
+        ],
+        "sop": [
+            "1. Extract dict values to variables before f-string: val = d['key']; print(f'{val}')",
+            "2. Use python3 with a script file instead of -c for complex code",
+            "3. Avoid backslash escapes inside f-strings",
+            "4. Test with simpler print statements first"
+        ],
+        "example_bad": "python3 -c 'print(f\"{d[\\\"key\\\"]}\")'",
+        "example_good": "python3 -c 'val = d[\"key\"]; print(f\"{val}\")'"
+    },
+    "COMMAND_NOT_FOUND": {
+        "description": "The command/binary doesn't exist or isn't in PATH",
+        "common_causes": [
+            "Tool not installed",
+            "Wrong command name",
+            "PATH not set correctly"
+        ],
+        "sop": [
+            "1. Check if installed: which <command> or brew list",
+            "2. Install if needed: brew install <package>",
+            "3. Use full path if PATH issues: /usr/local/bin/<command>",
+            "4. Check for typos in command name"
+        ],
+        "example_bad": "rg pattern  # if ripgrep not installed",
+        "example_good": "grep -r pattern  # or: brew install ripgrep"
+    },
+    "PERMISSION_DENIED": {
+        "description": "No permission to execute or access file/directory",
+        "common_causes": [
+            "Script not executable",
+            "File owned by different user",
+            "Directory permissions too restrictive"
+        ],
+        "sop": [
+            "1. Make script executable: chmod +x script.sh",
+            "2. Check ownership: ls -la file",
+            "3. Run with python3 explicitly: python3 script.py",
+            "4. Check if file is being written to while reading"
+        ],
+        "example_bad": "./script.py  # not executable",
+        "example_good": "chmod +x ./script.py && ./script.py  # or: python3 ./script.py"
+    },
+    "FILE_NOT_FOUND": {
+        "description": "File or directory doesn't exist",
+        "common_causes": [
+            "Typo in path",
+            "File not created yet",
+            "Wrong working directory"
+        ],
+        "sop": [
+            "1. Verify path exists: ls -la <parent_dir>",
+            "2. Check current directory: pwd",
+            "3. Create directory if needed: mkdir -p <dir>",
+            "4. Use absolute paths to avoid confusion"
+        ],
+        "example_bad": "cat config.json  # in wrong directory",
+        "example_good": "ls -la . && cat ./config.json  # verify first"
+    },
+    "NON_ZERO_EXIT": {
+        "description": "Command ran but returned error exit code",
+        "common_causes": [
+            "Command logic failed (grep found nothing, test failed, etc.)",
+            "Missing required arguments",
+            "Invalid input data"
+        ],
+        "sop": [
+            "1. Check command stderr for details",
+            "2. Verify input arguments are correct",
+            "3. For grep: empty result is exit 1 (not always an error)",
+            "4. Add || true if exit code doesn't matter"
+        ],
+        "example_bad": "grep pattern file.txt  # exits 1 if no match",
+        "example_good": "grep pattern file.txt || echo 'No matches found'"
+    },
+    "UNEXPECTED_TOKEN": {
+        "description": "Shell encountered unexpected character or token",
+        "common_causes": [
+            "Unmatched quotes",
+            "Missing semicolon or &&",
+            "Special chars not escaped"
+        ],
+        "sop": [
+            "1. Check for unmatched quotes (', \", `)",
+            "2. Escape special characters: \\( \\) \\$ \\`",
+            "3. Use single quotes for literal strings",
+            "4. Break into multiple commands"
+        ],
+        "example_bad": "echo \"hello world  # missing closing quote",
+        "example_good": "echo \"hello world\""
+    },
+    "OTHER": {
+        "description": "Uncategorized error",
+        "common_causes": ["Various"],
+        "sop": [
+            "1. Read the error message carefully",
+            "2. Search for the specific error",
+            "3. Try a simpler version of the command",
+            "4. Check command documentation: man <command> or <command> --help"
+        ],
+        "example_bad": "",
+        "example_good": ""
+    }
+}
+
+def get_session_dir(project_path):
+    """Convert project path to Claude's session directory format."""
+    project_dir = project_path.replace("/", "-")
+    return Path.home() / ".claude" / "projects" / project_dir
+
+def get_latest_session(session_dir):
+    """Get the most recent session file."""
+    jsonl_files = list(session_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        return None
+    return max(jsonl_files, key=lambda f: f.stat().st_mtime)
+
+def extract_command_sequence(session_file):
+    """Extract all bash commands in order with their success/failure status."""
+    commands = {}
+    results = {}
+
+    with open(session_file, "r") as f:
+        for idx, line in enumerate(f):
+            try:
+                entry = json.loads(line.strip())
+
+                if entry.get("type") == "assistant":
+                    content = entry.get("message", {}).get("content", [])
+                    for item in content:
+                        if item.get("type") == "tool_use" and item.get("name") == "Bash":
+                            tool_id = item.get("id")
+                            cmd = item.get("input", {}).get("command", "")
+                            commands[tool_id] = {"command": cmd, "index": idx}
+
+                if entry.get("type") == "user":
+                    content = entry.get("message", {}).get("content", [])
+                    for item in content:
+                        if isinstance(item, dict) and "tool_use_id" in item:
+                            tool_id = item.get("tool_use_id")
+                            is_error = item.get("is_error", False)
+                            error_content = item.get("content", "") if is_error else ""
+                            results[tool_id] = {
+                                "is_error": is_error,
+                                "error_msg": error_content,
+                                "result_index": idx
+                            }
+            except json.JSONDecodeError:
+                continue
+
+    sequence = []
+    for tool_id, cmd_info in commands.items():
+        if tool_id in results:
+            sequence.append({
+                "command": cmd_info["command"],
+                "is_error": results[tool_id]["is_error"],
+                "error_msg": results[tool_id]["error_msg"],
+                "index": cmd_info["index"]
+            })
+
+    sequence.sort(key=lambda x: x["index"])
+    return sequence
+
+def group_failure_sequences(command_sequence):
+    """Group consecutive failures followed by success."""
+    groups = []
+    current_failures = []
+
+    for cmd in command_sequence:
+        if cmd["is_error"]:
+            current_failures.append(cmd)
+        else:
+            if current_failures:
+                groups.append({
+                    "failures": current_failures.copy(),
+                    "resolution": cmd["command"]
+                })
+                current_failures = []
+
+    if current_failures:
+        groups.append({
+            "failures": current_failures.copy(),
+            "resolution": None
+        })
+
+    return groups
+
+def categorize_error(error_msg):
+    """Categorize the type of error for pattern matching."""
+    error_lower = error_msg.lower()
+
+    if "parse error" in error_lower and "(" in error_lower:
+        return "SHELL_PARSE_ERROR"
+    if "command not found" in error_lower:
+        return "COMMAND_NOT_FOUND"
+    if "permission denied" in error_lower:
+        return "PERMISSION_DENIED"
+    if "no such file" in error_lower:
+        return "FILE_NOT_FOUND"
+    if "syntax" in error_lower:
+        return "SYNTAX_ERROR"
+    if "unexpected" in error_lower:
+        return "UNEXPECTED_TOKEN"
+    if "exit code" in error_lower:
+        return "NON_ZERO_EXIT"
+    return "OTHER"
+
+def truncate(s, length=150):
+    if not s:
+        return "(none)"
+    if len(s) > length:
+        return s[:length] + "..."
+    return s
+
+def print_sop(category):
+    """Print the SOP for an error category."""
+    sop = ERROR_SOPS.get(category, ERROR_SOPS["OTHER"])
+
+    print(f"\n  SOP for {category}:")
+    print(f"  Description: {sop['description']}")
+    print(f"  Common causes:")
+    for cause in sop["common_causes"]:
+        print(f"    - {cause}")
+    print(f"  Fix steps:")
+    for step in sop["sop"]:
+        print(f"    {step}")
+    if sop.get("example_bad"):
+        print(f"  BAD:  {sop['example_bad']}")
+        print(f"  GOOD: {sop['example_good']}")
+
+def main():
+    project_path = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    recent_n = 10
+    show_sop = "--sop" in sys.argv
+
+    if "--recent" in sys.argv:
+        idx = sys.argv.index("--recent")
+        if idx + 1 < len(sys.argv):
+            try:
+                recent_n = int(sys.argv[idx + 1])
+            except ValueError:
+                pass
+
+    # If just --sop with no project, show all SOPs
+    if show_sop and len(sys.argv) == 2:
+        print("=== ALL ERROR TYPE SOPs ===\n")
+        for category in ERROR_SOPS:
+            print(f"{'='*60}")
+            print_sop(category)
+            print()
+        return
+
+    session_dir = get_session_dir(project_path)
+
+    if not session_dir.exists():
+        print(f"No session history found for: {project_path}")
+        sys.exit(1)
+
+    session_file = get_latest_session(session_dir)
+
+    if not session_file:
+        print(f"No session files found")
+        sys.exit(1)
+
+    print(f"=== Failure Sequences & Resolutions ===")
+    print(f"=== Session: {session_file.stem} ===")
+    print()
+
+    command_sequence = extract_command_sequence(session_file)
+    failure_groups = group_failure_sequences(command_sequence)
+
+    if not failure_groups:
+        print("No command failures found in this session.")
+        return
+
+    failure_groups = failure_groups[-recent_n:]
+    patterns = {}
+
+    for i, group in enumerate(failure_groups, 1):
+        failures = group["failures"]
+        resolution = group["resolution"]
+        primary_category = categorize_error(failures[0]["error_msg"])
+
+        print(f"{'='*60}")
+        print(f"FAILURE GROUP #{i} - {len(failures)} attempt(s)")
+        print(f"Error Type: {primary_category}")
+        print(f"{'='*60}")
+
+        for j, fail in enumerate(failures, 1):
+            print(f"\n  Attempt {j} [FAILED]:")
+            print(f"    CMD:   {truncate(fail['command'], 120)}")
+            print(f"    ERROR: {truncate(fail['error_msg'], 100)}")
+
+        print(f"\n  RESOLUTION [WORKED]:")
+        if resolution:
+            print(f"    CMD:   {truncate(resolution, 120)}")
+            key = primary_category
+            if key not in patterns:
+                patterns[key] = {"count": 0, "examples": []}
+            patterns[key]["count"] += 1
+            patterns[key]["examples"].append({
+                "failed": failures[-1]["command"][:100],
+                "worked": resolution[:100]
+            })
+        else:
+            print(f"    (No resolution yet)")
+
+        # Show SOP if requested
+        if show_sop:
+            print_sop(primary_category)
+
+        print()
+
+    # Summary
+    print(f"{'='*60}")
+    print("LEARNED PATTERNS")
+    print(f"{'='*60}")
+
+    for category, data in sorted(patterns.items(), key=lambda x: -x[1]["count"]):
+        print(f"\n{category} ({data['count']} occurrences):")
+        if data["examples"]:
+            ex = data["examples"][-1]
+            print(f"  DONT: {truncate(ex['failed'], 80)}")
+            print(f"  DO:   {truncate(ex['worked'], 80)}")
+
+    print(f"\nTotal: {len(failure_groups)} failure sequences")
+    print("Use --sop to see Standard Operating Procedures for each error type")
+
+if __name__ == "__main__":
+    main()
