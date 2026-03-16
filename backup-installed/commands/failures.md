@@ -9,7 +9,7 @@ Usage:
 Run: `python3 ~/.claude/bin/claude-failures "$PWD" $ARGUMENTS`
 
 After showing the output:
-1. Review the LEARNED PATTERNS section
+1. Review the PATTERNS LEARNED section
 2. If you see a pattern you've hit before, apply the SOP immediately
 3. When you encounter a similar error in the future, use the "WORKED" command pattern instead of the "FAILED" pattern
 

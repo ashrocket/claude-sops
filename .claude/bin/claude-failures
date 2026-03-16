@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Extract bash command failures WITH their resolutions from Claude Code sessions.
-Groups consecutive failures, shows what worked, and provides SOPs for each error type.
+/failures command - Show shell failures with resolutions and SOPs.
+Supports layered SOPs from sops.py library with inline fallback.
 
-Usage: claude-failures [project-path] [--recent N] [--sop]
+Usage: claude-failures [project-path] [--recent N] [--sop] [--all]
 """
 
 import json
@@ -11,8 +11,24 @@ import sys
 import os
 from pathlib import Path
 
-# Standard Operating Procedures for each error type
-ERROR_SOPS = {
+# Add lib to path
+LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+INSTALLED_LIB_DIR = Path.home() / ".claude" / "lib"
+
+# Try installed location first, then source location
+if INSTALLED_LIB_DIR.exists():
+    sys.path.insert(0, str(INSTALLED_LIB_DIR))
+elif LIB_DIR.exists():
+    sys.path.insert(0, str(LIB_DIR))
+
+try:
+    from sops import load_sops, match_error, format_sop
+    HAS_SOPS_LIB = True
+except ImportError:
+    HAS_SOPS_LIB = False
+
+# Inline fallback SOPs (used when sops.py library not available)
+FALLBACK_SOPS = {
     "SHELL_PARSE_ERROR": {
         "description": "zsh cannot parse command substitution or special characters",
         "common_causes": [
@@ -140,10 +156,12 @@ ERROR_SOPS = {
     }
 }
 
+
 def get_session_dir(project_path):
     """Convert project path to Claude's session directory format."""
     project_dir = project_path.replace("/", "-")
     return Path.home() / ".claude" / "projects" / project_dir
+
 
 def get_latest_session(session_dir):
     """Get the most recent session file."""
@@ -151,6 +169,7 @@ def get_latest_session(session_dir):
     if not jsonl_files:
         return None
     return max(jsonl_files, key=lambda f: f.stat().st_mtime)
+
 
 def extract_command_sequence(session_file):
     """Extract all bash commands in order with their success/failure status."""
@@ -198,6 +217,7 @@ def extract_command_sequence(session_file):
     sequence.sort(key=lambda x: x["index"])
     return sequence
 
+
 def group_failure_sequences(command_sequence):
     """Group consecutive failures followed by success."""
     groups = []
@@ -222,6 +242,7 @@ def group_failure_sequences(command_sequence):
 
     return groups
 
+
 def categorize_error(error_msg):
     """Categorize the type of error for pattern matching."""
     error_lower = error_msg.lower()
@@ -242,6 +263,17 @@ def categorize_error(error_msg):
         return "NON_ZERO_EXIT"
     return "OTHER"
 
+
+def get_error_type(error_msg):
+    """Get error type using library if available, falling back to inline categorization."""
+    if HAS_SOPS_LIB:
+        sops = load_sops()
+        match = match_error(error_msg, sops)
+        if match:
+            return match[0]  # SOP name from library
+    return categorize_error(error_msg)
+
+
 def truncate(s, length=150):
     if not s:
         return "(none)"
@@ -249,15 +281,24 @@ def truncate(s, length=150):
         return s[:length] + "..."
     return s
 
+
 def print_sop(category):
-    """Print the SOP for an error category."""
-    sop = ERROR_SOPS.get(category, ERROR_SOPS["OTHER"])
+    """Print the SOP for an error category, using library or fallback."""
+    if HAS_SOPS_LIB:
+        sops = load_sops()
+        if category in sops.get("sops", {}):
+            print(format_sop(category, sops["sops"][category]))
+            return
+
+    # Fallback to inline SOPs
+    sop = FALLBACK_SOPS.get(category, FALLBACK_SOPS["OTHER"])
 
     print(f"\n  SOP for {category}:")
     print(f"  Description: {sop['description']}")
-    print(f"  Common causes:")
-    for cause in sop["common_causes"]:
-        print(f"    - {cause}")
+    if sop.get("common_causes"):
+        print(f"  Common causes:")
+        for cause in sop["common_causes"]:
+            print(f"    - {cause}")
     print(f"  Fix steps:")
     for step in sop["sop"]:
         print(f"    {step}")
@@ -265,26 +306,48 @@ def print_sop(category):
         print(f"  BAD:  {sop['example_bad']}")
         print(f"  GOOD: {sop['example_good']}")
 
-def main():
-    project_path = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
-    recent_n = 10
-    show_sop = "--sop" in sys.argv
 
-    if "--recent" in sys.argv:
-        idx = sys.argv.index("--recent")
-        if idx + 1 < len(sys.argv):
-            try:
-                recent_n = int(sys.argv[idx + 1])
-            except ValueError:
-                pass
+def show_all_sops():
+    """Show all SOPs from library and/or fallbacks."""
+    print("=== All SOPs ===\n")
 
-    # If just --sop with no project, show all SOPs
-    if show_sop and len(sys.argv) == 2:
-        print("=== ALL ERROR TYPE SOPs ===\n")
-        for category in ERROR_SOPS:
+    if HAS_SOPS_LIB:
+        sops = load_sops()
+        for name, sop in sops.get("sops", {}).items():
+            print(f"{'='*60}")
+            print(format_sop(name, sop))
+            print()
+    else:
+        for category in FALLBACK_SOPS:
             print(f"{'='*60}")
             print_sop(category)
             print()
+
+
+def main():
+    args = sys.argv[1:]
+    project_path = args[0] if args else os.getcwd()
+
+    show_sop = "--sop" in args
+    show_all = "--all" in args
+    recent_n = 10
+
+    if "--recent" in args:
+        idx = args.index("--recent")
+        if idx + 1 < len(args):
+            try:
+                recent_n = int(args[idx + 1])
+            except ValueError:
+                pass
+
+    # Show all SOPs and exit
+    if show_all:
+        show_all_sops()
+        return
+
+    # If just --sop with no project arg, show all SOPs
+    if show_sop and len(args) == 1:
+        show_all_sops()
         return
 
     session_dir = get_session_dir(project_path)
@@ -296,7 +359,7 @@ def main():
     session_file = get_latest_session(session_dir)
 
     if not session_file:
-        print(f"No session files found")
+        print("No session files found")
         sys.exit(1)
 
     print(f"=== Failure Sequences & Resolutions ===")
@@ -316,7 +379,7 @@ def main():
     for i, group in enumerate(failure_groups, 1):
         failures = group["failures"]
         resolution = group["resolution"]
-        primary_category = categorize_error(failures[0]["error_msg"])
+        primary_category = get_error_type(failures[0]["error_msg"])
 
         print(f"{'='*60}")
         print(f"FAILURE GROUP #{i} - {len(failures)} attempt(s)")
@@ -361,7 +424,11 @@ def main():
             print(f"  DO:   {truncate(ex['worked'], 80)}")
 
     print(f"\nTotal: {len(failure_groups)} failure sequences")
-    print("Use --sop to see Standard Operating Procedures for each error type")
+
+    source = "sops.json library" if HAS_SOPS_LIB else "inline fallback SOPs"
+    print(f"SOPs loaded from: {source}")
+    print("Use --sop to see SOPs for each error type, --all to list all SOPs")
+
 
 if __name__ == "__main__":
     main()

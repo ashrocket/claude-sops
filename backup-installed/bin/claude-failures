@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+/failures command - Show shell failures with resolutions and SOPs.
+"""
+
+import json
+import sys
+import os
+from pathlib import Path
+from datetime import datetime
+
+# Add lib to path
+LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+INSTALLED_LIB_DIR = Path.home() / ".claude" / "lib"
+
+# Try installed location first, then source location
+if INSTALLED_LIB_DIR.exists():
+    sys.path.insert(0, str(INSTALLED_LIB_DIR))
+elif LIB_DIR.exists():
+    sys.path.insert(0, str(LIB_DIR))
+
+from sops import load_sops, match_error, format_sop
+
+
+def get_session_dir(project_path: str) -> Path:
+    """Convert project path to Claude's session directory."""
+    project_dir = project_path.replace("/", "-")
+    return Path.home() / ".claude" / "projects" / project_dir
+
+
+def get_latest_session(session_dir: Path) -> Path | None:
+    """Get most recent session file."""
+    jsonl_files = list(session_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        return None
+    return max(jsonl_files, key=lambda f: f.stat().st_mtime)
+
+
+def extract_commands(session_file: Path) -> list[dict]:
+    """Extract bash commands with success/failure status."""
+    commands = {}
+    results = {}
+
+    with open(session_file) as f:
+        for idx, line in enumerate(f):
+            try:
+                entry = json.loads(line.strip())
+
+                if entry.get("type") == "assistant":
+                    content = entry.get("message", {}).get("content", [])
+                    for item in content:
+                        if item.get("type") == "tool_use" and item.get("name") == "Bash":
+                            tool_id = item.get("id")
+                            cmd = item.get("input", {}).get("command", "")
+                            commands[tool_id] = {"command": cmd, "index": idx}
+
+                if entry.get("type") == "user":
+                    content = entry.get("message", {}).get("content", [])
+                    for item in content:
+                        if isinstance(item, dict) and "tool_use_id" in item:
+                            tool_id = item.get("tool_use_id")
+                            is_error = item.get("is_error", False)
+                            error_content = item.get("content", "") if is_error else ""
+                            results[tool_id] = {
+                                "is_error": is_error,
+                                "error_msg": error_content
+                            }
+            except json.JSONDecodeError:
+                continue
+
+    sequence = []
+    for tool_id, cmd_info in commands.items():
+        if tool_id in results:
+            sequence.append({
+                "command": cmd_info["command"],
+                "is_error": results[tool_id]["is_error"],
+                "error_msg": results[tool_id]["error_msg"],
+                "index": cmd_info["index"]
+            })
+
+    sequence.sort(key=lambda x: x["index"])
+    return sequence
+
+
+def group_failures(commands: list[dict]) -> list[dict]:
+    """Group consecutive failures followed by success."""
+    groups = []
+    current_failures = []
+
+    for cmd in commands:
+        if cmd["is_error"]:
+            current_failures.append(cmd)
+        else:
+            if current_failures:
+                groups.append({
+                    "failures": current_failures.copy(),
+                    "resolution": cmd["command"]
+                })
+                current_failures = []
+
+    if current_failures:
+        groups.append({
+            "failures": current_failures.copy(),
+            "resolution": None
+        })
+
+    return groups
+
+
+def truncate(s: str, length: int = 100) -> str:
+    if len(s) > length:
+        return s[:length] + "..."
+    return s
+
+
+def show_all_sops(sops: dict):
+    """Show all SOPs."""
+    print("=== All SOPs ===\n")
+    for name, sop in sops.get("sops", {}).items():
+        print(format_sop(name, sop))
+        print()
+
+
+def main():
+    args = sys.argv[1:]
+    project_path = args[0] if args else os.getcwd()
+
+    show_sop = "--sop" in args
+    show_all = "--all" in args
+    recent_n = 10
+
+    if "--recent" in args:
+        idx = args.index("--recent")
+        if idx + 1 < len(args):
+            try:
+                recent_n = int(args[idx + 1])
+            except ValueError:
+                pass
+
+    sops = load_sops()
+
+    if show_all:
+        show_all_sops(sops)
+        return
+
+    session_dir = get_session_dir(project_path)
+
+    if not session_dir.exists():
+        print(f"No session history found for: {project_path}")
+        sys.exit(1)
+
+    session_file = get_latest_session(session_dir)
+
+    if not session_file:
+        print("No session files found")
+        sys.exit(1)
+
+    print(f"=== Shell Failures & Resolutions ===")
+    print(f"=== Session: {session_file.stem} ===\n")
+
+    commands = extract_commands(session_file)
+    failure_groups = group_failures(commands)
+
+    if not failure_groups:
+        print("No command failures found in this session.")
+        return
+
+    failure_groups = failure_groups[-recent_n:]
+    patterns = {}
+
+    for i, group in enumerate(failure_groups, 1):
+        failures = group["failures"]
+        resolution = group["resolution"]
+
+        # Determine error type
+        first_error = failures[0]["error_msg"]
+        match = match_error(first_error, sops)
+        error_type = match[0] if match else "UNKNOWN"
+
+        print(f"--- FAILURE #{i}: {error_type} ---")
+
+        for fail in failures:
+            print(f"  X {truncate(fail['command'], 80)}")
+            print(f"    -> {truncate(fail['error_msg'], 60)}")
+
+        if resolution:
+            print(f"  OK {truncate(resolution, 80)}")
+
+            if error_type not in patterns:
+                patterns[error_type] = 0
+            patterns[error_type] += 1
+        else:
+            print("  (unresolved)")
+
+        if show_sop and match:
+            print()
+            print(format_sop(match[0], match[1]))
+
+        print()
+
+    # Summary
+    if patterns:
+        print("--- PATTERNS LEARNED ---")
+        for error_type, count in sorted(patterns.items(), key=lambda x: -x[1]):
+            print(f"  {error_type} ({count}x)")
+        print()
+
+    resolved = sum(1 for g in failure_groups if g["resolution"])
+    print(f"Total: {len(failure_groups)} failures, {resolved} resolved")
+
+
+if __name__ == "__main__":
+    main()

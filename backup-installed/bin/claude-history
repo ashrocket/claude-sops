@@ -1,0 +1,104 @@
+#!/bin/bash
+# Extract bash command history from Claude Code sessions
+# Usage: claude-history [project-path] [num-commands] [--failures]
+
+PROJECT_PATH="${1:-$(pwd)}"
+NUM_COMMANDS="${2:-20}"
+SHOW_FAILURES="${3:-}"
+
+# Convert path to Claude's directory format
+PROJECT_DIR=$(echo "$PROJECT_PATH" | sed 's|/|-|g')
+SESSION_DIR="$HOME/.claude/projects/$PROJECT_DIR"
+
+if [ ! -d "$SESSION_DIR" ]; then
+    echo "No session history found for: $PROJECT_PATH"
+    echo "Looking in: $SESSION_DIR"
+    exit 1
+fi
+
+# Get the most recent session file
+LATEST_SESSION=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+
+if [ -z "$LATEST_SESSION" ]; then
+    echo "No session files found in: $SESSION_DIR"
+    exit 1
+fi
+
+echo "=== Commands from session: $(basename "$LATEST_SESSION" .jsonl) ==="
+echo "=== Project: $PROJECT_PATH ==="
+echo ""
+
+if [ "$SHOW_FAILURES" = "--failures" ] || [ "$NUM_COMMANDS" = "--failures" ]; then
+    echo "=== FAILED COMMANDS (shell syntax errors) ==="
+    echo ""
+
+    # Extract failed bash commands with their errors using Python
+    python3 -c '
+import json
+import sys
+
+session_file = sys.argv[1]
+
+# Read and parse JSONL
+commands = {}  # tool_use_id -> command
+failures = []
+
+with open(session_file, "r") as f:
+    for line in f:
+        try:
+            entry = json.loads(line.strip())
+
+            # Capture commands
+            if entry.get("type") == "assistant":
+                content = entry.get("message", {}).get("content", [])
+                for item in content:
+                    if item.get("type") == "tool_use" and item.get("name") == "Bash":
+                        tool_id = item.get("id")
+                        cmd = item.get("input", {}).get("command", "")
+                        commands[tool_id] = cmd
+
+            # Capture failures
+            if entry.get("type") == "user":
+                content = entry.get("message", {}).get("content", [])
+                for item in content:
+                    if isinstance(item, dict) and item.get("is_error") == True:
+                        tool_id = item.get("tool_use_id")
+                        error = item.get("content", "")
+                        if tool_id in commands:
+                            failures.append({
+                                "command": commands[tool_id],
+                                "error": error
+                            })
+        except json.JSONDecodeError:
+            continue
+
+# Print failures
+for i, fail in enumerate(failures, 1):
+    cmd = fail["command"]
+    err = fail["error"]
+    if len(cmd) > 300:
+        cmd = cmd[:300] + "..."
+    print(f"--- Failure #{i} ---")
+    print(f"Command: {cmd}")
+    print(f"Error: {err}")
+    print()
+
+if not failures:
+    print("No command failures found in this session.")
+
+print(f"Total failures: {len(failures)}")
+' "$LATEST_SESSION"
+
+else
+    # Extract bash commands (original behavior)
+    cat "$LATEST_SESSION" | jq -r '
+      select(.type == "assistant") |
+      .message.content[]? |
+      select(.type == "tool_use" and .name == "Bash") |
+      .input.command
+    ' 2>/dev/null | tail -n "$NUM_COMMANDS" | nl
+
+    echo ""
+    echo "--- Showing last $NUM_COMMANDS commands ---"
+    echo "--- Use --failures flag to see failed commands ---"
+fi

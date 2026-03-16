@@ -18,6 +18,8 @@ echo "📁 Creating directories..."
 mkdir -p "$CLAUDE_DIR/bin"
 mkdir -p "$CLAUDE_DIR/hooks"
 mkdir -p "$CLAUDE_DIR/commands"
+mkdir -p "$CLAUDE_DIR/lib"
+mkdir -p "$CLAUDE_DIR/shell-failures"
 
 # Copy scripts
 echo "📋 Installing scripts..."
@@ -27,6 +29,20 @@ chmod +x "$CLAUDE_DIR/bin/claude-failures"
 chmod +x "$CLAUDE_DIR/bin/claude-history"
 echo "   ✓ claude-failures"
 echo "   ✓ claude-history"
+
+# Copy library
+echo "📚 Installing SOP library..."
+cp "$SCRIPT_DIR/.claude/lib/sops.py" "$CLAUDE_DIR/lib/"
+echo "   ✓ sops.py"
+
+# Copy SOP data (only if not already present - don't overwrite user customizations)
+if [ ! -f "$CLAUDE_DIR/shell-failures/sops.json" ]; then
+    echo "📦 Installing SOP definitions..."
+    cp "$SCRIPT_DIR/.claude/shell-failures/sops.json" "$CLAUDE_DIR/shell-failures/"
+    echo "   ✓ sops.json"
+else
+    echo "📦 SOP definitions already exist (skipping to preserve customizations)"
+fi
 
 # Copy hooks
 echo "🪝 Installing hooks..."

@@ -1,0 +1,307 @@
+{
+  "version": 1,
+  "sops": {
+    "SHELL_PARSE_ERROR": {
+      "description": "zsh cannot parse command substitution or special characters",
+      "patterns": ["parse error", "near `('", "parse error near"],
+      "causes": [
+        "Using $(...) with complex expressions",
+        "Nested command substitutions",
+        "Special characters not escaped"
+      ],
+      "fixes": [
+        "Use simple pipes instead of $(...)",
+        "Split into multiple commands",
+        "Use Read tool instead of cat/head"
+      ],
+      "examples": {
+        "bad": "LATEST=$(ls -t *.jsonl | head -1); cat \"$LATEST\"",
+        "good": "ls -t *.jsonl | head -1  # then use Read tool"
+      }
+    },
+    "SYNTAX_ERROR": {
+      "description": "Python or shell syntax error in inline code",
+      "patterns": ["syntaxerror", "syntax error", "invalid syntax"],
+      "causes": [
+        "f-strings with escaped quotes inside dict access",
+        "Mixing single/double quotes incorrectly",
+        "Heredoc escaping issues"
+      ],
+      "fixes": [
+        "Extract dict values to variables before f-string",
+        "Write Python to a script file instead of -c",
+        "Use single quotes for outer string in python3 -c"
+      ],
+      "examples": {
+        "bad": "python3 -c 'print(f\"{d[\\\"key\\\"]}\")'",
+        "good": "python3 -c 'val = d[\"key\"]; print(f\"{val}\")'"
+      }
+    },
+    "COMMAND_NOT_FOUND": {
+      "description": "Command or binary doesn't exist or isn't in PATH",
+      "patterns": ["command not found", "not found"],
+      "causes": [
+        "Tool not installed",
+        "Wrong command name",
+        "PATH not set correctly"
+      ],
+      "fixes": [
+        "Check if installed: which <command>",
+        "Install if needed: brew install <package>",
+        "Use alternative (grep instead of rg)"
+      ],
+      "examples": {
+        "bad": "rg pattern  # if ripgrep not installed",
+        "good": "grep -r pattern  # or: brew install ripgrep"
+      }
+    },
+    "PERMISSION_DENIED": {
+      "description": "No permission to execute or access file",
+      "patterns": ["permission denied"],
+      "causes": [
+        "Script not executable",
+        "File owned by different user",
+        "Directory permissions too restrictive"
+      ],
+      "fixes": [
+        "Make script executable: chmod +x script.sh",
+        "Run with interpreter: python3 script.py",
+        "Check file ownership: ls -la file"
+      ],
+      "examples": {
+        "bad": "./script.py  # not executable",
+        "good": "python3 ./script.py"
+      }
+    },
+    "FILE_NOT_FOUND": {
+      "description": "File or directory doesn't exist",
+      "patterns": ["no such file", "not found", "does not exist"],
+      "causes": [
+        "Typo in path",
+        "File not created yet",
+        "Wrong working directory"
+      ],
+      "fixes": [
+        "Verify path exists: ls -la <parent_dir>",
+        "Check current directory: pwd",
+        "Create directory if needed: mkdir -p <dir>",
+        "Use absolute paths"
+      ],
+      "examples": {
+        "bad": "cat config.json  # in wrong directory",
+        "good": "ls -la . && cat ./config.json"
+      }
+    },
+    "NON_ZERO_EXIT": {
+      "description": "Command ran but returned non-zero exit code",
+      "patterns": ["exit code", "exited with", "returned"],
+      "causes": [
+        "Command logic failed",
+        "Missing required arguments",
+        "Invalid input data"
+      ],
+      "fixes": [
+        "Check stderr for details",
+        "For grep: exit 1 means no match (often ok)",
+        "Add || true if exit code doesn't matter"
+      ],
+      "examples": {
+        "bad": "grep pattern file.txt  # exits 1 if no match",
+        "good": "grep pattern file.txt || echo 'No matches'"
+      }
+    },
+    "PIPE_ESCAPING": {
+      "description": "Pipe character incorrectly parsed in complex commands",
+      "patterns": ["< /dev/null", "unexpected redirect", "ambiguous redirect"],
+      "causes": [
+        "Pipe (|) in jq or complex expressions gets corrupted",
+        "Shell interprets pipe as redirect",
+        "Known Claude Code Bash tool issue with pipes in certain contexts"
+      ],
+      "fixes": [
+        "Use && to chain commands instead of pipes where possible",
+        "Write complex jq queries to a file, then run jq -f",
+        "Split piped commands into separate sequential Bash calls",
+        "Use process substitution <() instead of pipes when needed"
+      ],
+      "examples": {
+        "bad": "jq '.entries[]|.name' file.json",
+        "good": "jq '.entries[] | .name' file.json  # or split into steps"
+      }
+    },
+    "USE_DEDICATED_TOOLS": {
+      "description": "Using bash for operations that have dedicated Claude tools",
+      "patterns": ["cat ", "head ", "tail ", "grep ", "find ", "echo "],
+      "causes": [
+        "Habit of using shell commands for file operations",
+        "Not aware of dedicated tools with better UX"
+      ],
+      "fixes": [
+        "Use Read tool instead of cat/head/tail for viewing files",
+        "Use Grep tool instead of grep/rg for searching content",
+        "Use Glob tool instead of find/ls for finding files",
+        "Use Edit tool instead of sed/awk for modifying files",
+        "Use Write tool instead of echo/cat heredoc for creating files"
+      ],
+      "examples": {
+        "bad": "cat config.json | head -50",
+        "good": "Use Read tool with file_path and optional limit parameter"
+      }
+    },
+    "INTERACTIVE_COMMAND": {
+      "description": "Attempting to run interactive commands that require TTY",
+      "patterns": ["vim", "nano", "less", "more", "interactive", "password", "prompt"],
+      "causes": [
+        "Command requires user input or TTY",
+        "Command waits for password or confirmation",
+        "Editor or pager needs terminal"
+      ],
+      "fixes": [
+        "Use Edit/Write tools instead of vim/nano",
+        "Use Read tool instead of less/more",
+        "Use non-interactive flags: git commit -m instead of git commit",
+        "For password prompts, ask user to run command themselves"
+      ],
+      "examples": {
+        "bad": "vim file.txt",
+        "good": "Use Edit tool to modify file.txt"
+      }
+    },
+    "QUOTE_NESTING": {
+      "description": "Incorrect quote nesting in shell commands",
+      "patterns": ["unexpected EOF", "unterminated", "unmatched", "bad substitution"],
+      "causes": [
+        "Mixing single and double quotes incorrectly",
+        "Trying to nest same quote type",
+        "JSON inside shell command needs careful escaping"
+      ],
+      "fixes": [
+        "Use heredoc (<<'EOF') for multi-line or complex content",
+        "Alternate quote types: outer single, inner double or vice versa",
+        "For JSON in commands, write to file first then reference",
+        "Use $'...' syntax for strings with special characters"
+      ],
+      "examples": {
+        "bad": "echo '{\"key\": \"value with 'quotes'\"}'",
+        "good": "cat <<'EOF'\n{\"key\": \"value with 'quotes'\"}\nEOF"
+      }
+    },
+    "TIMEOUT": {
+      "description": "Command killed after 2 minute default timeout (exit code 143)",
+      "patterns": ["exit code 143", "killed", "timeout", "timed out"],
+      "causes": [
+        "Command exceeds 2-minute default timeout",
+        "Long-running build, test, or analysis operations",
+        "BASH_DEFAULT_TIMEOUT_MS in shell env is ignored - only settings.json works"
+      ],
+      "fixes": [
+        "Configure timeout in ~/.claude/settings.json under env section",
+        "Set BASH_DEFAULT_TIMEOUT_MS: '1800000' for 30 min",
+        "Set BASH_MAX_TIMEOUT_MS: '7200000' for 2 hour max",
+        "Restart Claude Code after changing settings.json",
+        "Or optimize command to complete faster"
+      ],
+      "examples": {
+        "bad": "npm run build  # times out after 2 min",
+        "good": "Add to settings.json: {\"env\": {\"BASH_DEFAULT_TIMEOUT_MS\": \"1800000\"}}"
+      }
+    },
+    "INTERMITTENT_ESCAPING": {
+      "description": "Sporadic escaping corruption (GitHub Issue #7387) - command displays correctly but executes with broken escaping",
+      "patterns": ["\\$ (", "\\$ \\(", "for f in \\$", "syntax error near unexpected token"],
+      "causes": [
+        "Known intermittent bug in Claude Code bash tool (Issue #7387)",
+        "Dollar signs in $() get escaped as \\$ ( with spaces",
+        "Spurious < /dev/null inserted mid-command",
+        "Occurs in 'spurts' - once triggered, tends to persist in session"
+      ],
+      "fixes": [
+        "IMMEDIATELY switch to script file approach when this occurs",
+        "Write command to temp.sh with heredoc: cat > temp.sh << 'EOF'",
+        "chmod +x temp.sh && ./temp.sh && rm temp.sh",
+        "Don't retry inline - the bug persists once triggered",
+        "Script files bypass Claude's escaping layer entirely"
+      ],
+      "examples": {
+        "bad": "for f in $(find . -type f); do echo \"$f\"; done  # may corrupt to: for f in \\$ ( find...",
+        "good": "Write to script.sh with heredoc, make executable, run"
+      }
+    },
+    "COMPLEX_INLINE": {
+      "description": "Moderately complex inline commands that should use script files",
+      "patterns": ["pipe", "|", "$(", "for ", "while ", "if ", "${"],
+      "causes": [
+        "Command contains pipes, substitution, loops, conditionals, or parameter expansion",
+        "These work in normal bash but fail in Claude Code's bash tool",
+        "Middle-ground complexity is where most failures occur"
+      ],
+      "fixes": [
+        "Write ALL complex commands to script files using heredoc",
+        "Pattern: cat > script.sh << 'EOF' (single-quoted EOF prevents expansion)",
+        "Then: chmod +x script.sh && ./script.sh",
+        "Optional cleanup: rm script.sh",
+        "Simple commands (ls, pwd, git status) are fine inline"
+      ],
+      "examples": {
+        "bad": "find . -name '*.py' | xargs grep 'pattern' | head -10",
+        "good": "cat > search.sh << 'EOF'\n#!/bin/bash\nfind . -name '*.py' | xargs grep 'pattern' | head -10\nEOF\nchmod +x search.sh && ./search.sh"
+      }
+    },
+    "AWS_TOKEN_EXPIRED": {
+      "description": "AWS SSO token has expired and needs re-authentication",
+      "patterns": ["token has expired", "refresh failed", "unable to locate credentials", "ExpiredToken", "InvalidIdentityToken"],
+      "causes": [
+        "SSO session timed out (typically after 8-12 hours)",
+        "No profile specified and default not configured",
+        "Credentials file missing or corrupted"
+      ],
+      "fixes": [
+        "Re-authenticate with SSO: aws sso login --profile <profile>",
+        "Available profiles: kare-dev-admin, kare-prod-admin (write access)",
+        "Read-only profiles: kare-dev-readonly, kare-prod-readonly (prefer for lookups)",
+        "Always specify --profile when running AWS commands"
+      ],
+      "examples": {
+        "bad": "aws ec2 describe-instances",
+        "good": "aws --profile kare-dev-readonly ec2 describe-instances"
+      }
+    },
+    "AWS_ACCESS_DENIED": {
+      "description": "AWS permissions error - insufficient IAM permissions",
+      "patterns": ["accessdenied", "not authorized", "forbidden", "unauthorized"],
+      "causes": [
+        "Using readonly profile for write operations",
+        "IAM policy doesn't allow the action",
+        "Resource-based policy denying access"
+      ],
+      "fixes": [
+        "For read operations: use kare-dev-readonly or kare-prod-readonly",
+        "For write operations: use kare-dev-admin or kare-prod-admin",
+        "Check which profile is needed for the operation",
+        "Verify the resource exists in the correct account"
+      ],
+      "examples": {
+        "bad": "aws --profile kare-dev-readonly ssm send-command ...",
+        "good": "aws --profile kare-dev-admin ssm send-command ..."
+      }
+    },
+    "AWS_NOT_CONFIGURED": {
+      "description": "AWS CLI not configured or profile not found",
+      "patterns": ["aws not configured", "could not find", "profile", "config"],
+      "causes": [
+        "AWS CLI not installed",
+        "Profile name misspelled",
+        "~/.aws/config missing profile definition"
+      ],
+      "fixes": [
+        "Check available profiles: aws configure list-profiles",
+        "Use correct profile names: kare-dev-admin, kare-prod-admin, kare-dev-readonly, kare-prod-readonly",
+        "If AWS CLI not installed: brew install awscli"
+      ],
+      "examples": {
+        "bad": "aws --profile dev-admin ec2 ...",
+        "good": "aws --profile kare-dev-admin ec2 ..."
+      }
+    }
+  }
+}
